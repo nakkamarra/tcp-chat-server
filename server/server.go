@@ -7,8 +7,10 @@ import (
 	"io"
 	"net"
 	"os"
-	"sync"
 	"time"
+	"unicode"
+
+	"github.com/nakkamarra/tcp-chat-server/peers"
 )
 
 var ErrShutdown = errors.New("shutting down server")
@@ -22,8 +24,7 @@ type Message struct {
 type Server struct {
 	listener      net.Listener
 	signalChannel chan os.Signal
-	peers         map[net.Addr]net.Conn
-	mu            sync.Mutex
+	peers         *peers.List
 	broadcast     chan Message
 }
 
@@ -31,8 +32,7 @@ func New(listener net.Listener, sigChan chan os.Signal) *Server {
 	return &Server{
 		listener:      listener,
 		signalChannel: sigChan,
-		peers:         make(map[net.Addr]net.Conn),
-		mu:            sync.Mutex{},
+		peers:         peers.NewList(),
 		broadcast:     make(chan Message),
 	}
 }
@@ -61,23 +61,17 @@ func (s *Server) ListenAndServe() error {
 
 func (s *Server) handleBroadcast(m Message) {
 	fmt.Fprintf(os.Stdout, "message was broadcasted by (%s) @ [%s]: %s", m.remoteIP, m.ts.Format(time.Kitchen), m.content)
-	s.mu.Lock()
-	for ip, connection := range s.peers {
-		if ip == m.remoteIP {
-			continue
-		}
-		fmt.Fprintf(connection, "[%s] (%s) > %s", m.ts.Format(time.Kitchen), m.remoteIP, m.content)
-	}
-	s.mu.Unlock()
+	content := fmt.Sprintf("[%s] (%s) > %s", m.ts.Format(time.Kitchen), m.remoteIP, m.content)
+	s.peers.WriteToPeers(m.remoteIP, []byte(content))
 }
 
 func (s *Server) handleConnection(c net.Conn) {
 	defer c.Close()
 	s.registerConnect(c)
-	buf := make([]byte, 2<<12)
 	for {
-		read := bufio.NewReader(c)
-		bytesRead, readErr := read.Read(buf)
+		buf := make([]byte, 2<<12)
+		reader := bufio.NewReader(c)
+		bytesRead, readErr := reader.Read(buf)
 		if readErr == io.EOF {
 			break
 		}
@@ -87,6 +81,9 @@ func (s *Server) handleConnection(c net.Conn) {
 		}
 		if bytesRead < 1 {
 			fmt.Fprintf(os.Stdout, "read with no bytes from connection @ %s\n", c.RemoteAddr())
+		}
+		if bytesRead == 1 && unicode.IsSpace(rune(buf[0])) {
+			continue
 		}
 		s.broadcast <- Message{
 			ts:       time.Now(),
@@ -98,15 +95,11 @@ func (s *Server) handleConnection(c net.Conn) {
 }
 
 func (s *Server) registerConnect(c net.Conn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.peers[c.RemoteAddr()] = c
+	s.peers.Add(c)
 	fmt.Fprintf(os.Stdout, "client connected: %s\n", c.RemoteAddr())
 }
 
 func (s *Server) registerDisconnect(c net.Conn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.peers, c.RemoteAddr())
+	s.peers.Remove(c)
 	fmt.Fprintf(os.Stdout, "client disconnected: %s\n", c.RemoteAddr())
 }
